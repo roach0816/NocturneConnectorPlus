@@ -116,10 +116,10 @@ bun_url=$(jq -r '.assets[] | select(.name == "bun-linux-aarch64-musl.zip") | .br
 	"$bun_json")
 bun_digest=$(jq -r '.assets[] | select(.name == "bun-linux-aarch64-musl.zip") | .digest' \
 	"$bun_json")
-[ -n "$bun_url" ] && [ "$bun_url" != null ] || {
+if [ -z "$bun_url" ] || [ "$bun_url" = null ]; then
 	echo "Bun aarch64-musl asset is missing for v$bun_version." >&2
 	exit 1
-}
+fi
 case "$bun_digest" in
 	sha256:*) bun_sha256=${bun_digest#sha256:} ;;
 	*)
