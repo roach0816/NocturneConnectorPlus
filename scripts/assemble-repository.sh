@@ -45,8 +45,12 @@ touch "$site_dir/.nojekyll"
 docker run --rm --platform linux/arm64 \
 	-v "$repo_dir:/repo" \
 	-v "$private_key:/run/secrets/nocturne-connector-plus.rsa:ro" \
+	-v "$public_key:/run/secrets/nocturne-connector-plus.rsa.pub:ro" \
 	alpine:3.24 sh -ec '
 		apk add --no-cache abuild
+		install -m 0644 \
+			/run/secrets/nocturne-connector-plus.rsa.pub \
+			/etc/apk/keys/nocturne-connector-plus.rsa.pub
 		cd /repo
 		apk index -o APKINDEX.tar.gz ./*.apk
 		abuild-sign -k /run/secrets/nocturne-connector-plus.rsa APKINDEX.tar.gz
@@ -68,4 +72,3 @@ cat > "$site_dir/index.html" <<'EOF'
 EOF
 
 echo "Assembled repository with ${#release_tags[@]} retained package version(s)."
-
