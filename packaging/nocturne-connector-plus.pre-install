@@ -14,6 +14,37 @@ EOF
 fi
 
 rc-service connector-api stop >/dev/null 2>&1 || true
+
+# The appliance image already supplies these unowned OpenRC files. Because
+# Alpine protects /etc, leaving them in place would divert the package-managed
+# replacements to .apk-new. Preserve the originals outside the service paths,
+# then clear only the files this package is about to own.
+legacy_backup=/etc/nocturne-connector/pre-apk-service-backup
+backed_up=false
+backup_legacy_file() {
+	source_path=$1
+	backup_name=$2
+	if [ -e "$source_path" ] || [ -L "$source_path" ]; then
+		mkdir -p "$legacy_backup"
+		destination="$legacy_backup/$backup_name"
+		if [ -e "$destination" ] || [ -L "$destination" ]; then
+			destination="$destination.$(date +%s).$$"
+		fi
+		cp -p "$source_path" "$destination"
+		rm -f "$source_path"
+		backed_up=true
+	fi
+	rm -f "$source_path.apk-new"
+}
+
+backup_legacy_file /etc/init.d/connector-api init.d.connector-api
+backup_legacy_file /etc/init.d/wifi-import init.d.wifi-import
+backup_legacy_file /etc/conf.d/connector-api conf.d.connector-api
+
+if [ "$backed_up" = true ]; then
+	echo "Legacy OpenRC files were saved in $legacy_backup." >&2
+fi
+
 # The image's original version marker is unowned and protected. It is not
 # persistent user state; remove it immediately before APK installs its managed
 # replacement so Alpine cannot divert that replacement to version.apk-new.

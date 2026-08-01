@@ -113,6 +113,12 @@ The package transaction stops `connector-api`, replaces the application,
 installs a private Bun runtime, enables the required OpenRC services, restarts
 the API, and waits up to 30 seconds for `/api/info`.
 
+During the first install, existing `connector-api` and `wifi-import` OpenRC
+files are preserved under
+`/etc/nocturne-connector/pre-apk-service-backup/` before the package takes
+ownership of their standard paths. These backups are not used while the
+package is installed and are retained if the package is removed.
+
 If the old proof-of-concept updater is present, installation prints a warning.
 The package does not delete user-created files. Disable those commands after a
 successful package installation so the two update methods cannot be mixed:

@@ -27,6 +27,10 @@ printf '%s\n' auth-state > /etc/nocturne-connector/auth-session.json
 printf '%s\n' setup-state > /etc/nocturne-connector/setup-state.json
 printf '%s\n' analytics-state > /etc/nocturne-connector/analytics-enabled.json
 printf '%s\n' wifi-state > /etc/wpa_supplicant/wpa_supplicant.conf
+printf '%s\n' legacy-connector-service > /etc/init.d/connector-api
+printf '%s\n' legacy-wifi-service > /etc/init.d/wifi-import
+printf '%s\n' legacy-site-config > /etc/conf.d/connector-api
+chmod 0755 /etc/init.d/connector-api /etc/init.d/wifi-import
 
 apk verify "$new_package"
 [ -z "$old_package" ] || apk verify "$old_package"
@@ -44,6 +48,15 @@ check_install() {
 		echo "Package transaction created unexpected .apk-new files." >&2
 		exit 1
 	fi
+	for managed_path in \
+		/etc/init.d/connector-api \
+		/etc/init.d/wifi-import \
+		/etc/conf.d/connector-api; do
+		if [ -e "$managed_path.apk-new" ]; then
+			echo "OpenRC takeover created $managed_path.apk-new." >&2
+			exit 1
+		fi
+	done
 
 	curl -fsS --max-time 3 http://127.0.0.1/api/info \
 		>/tmp/connector-info.json
@@ -56,9 +69,23 @@ check_install() {
 
 if [ -n "$old_package" ]; then
 	apk add "$old_package"
+	test "$(cat /etc/nocturne-connector/pre-apk-service-backup/init.d.connector-api)" = \
+		legacy-connector-service
+	test "$(cat /etc/nocturne-connector/pre-apk-service-backup/init.d.wifi-import)" = \
+		legacy-wifi-service
+	test "$(cat /etc/nocturne-connector/pre-apk-service-backup/conf.d.connector-api)" = \
+		legacy-site-config
 	check_install
 fi
 apk add --upgrade "$new_package"
+if [ -z "$old_package" ]; then
+	test "$(cat /etc/nocturne-connector/pre-apk-service-backup/init.d.connector-api)" = \
+		legacy-connector-service
+	test "$(cat /etc/nocturne-connector/pre-apk-service-backup/init.d.wifi-import)" = \
+		legacy-wifi-service
+	test "$(cat /etc/nocturne-connector/pre-apk-service-backup/conf.d.connector-api)" = \
+		legacy-site-config
+fi
 check_install
 
 if apk info -R nocturne-connector-plus | grep -Eq '(^|[[:space:]])(bash|git|npm|unzip)([[:space:]]|$)'; then
