@@ -20,6 +20,9 @@ install -m 0644 /workspace/keys/nocturne-connector-plus.rsa.pub \
 	/etc/apk/keys/nocturne-connector-plus.rsa.pub
 cp /workspace/packaging/nocturne-connector-plus.protected-paths \
 	/etc/apk/protected_paths.d/nocturne-connector-plus.list
+printf '%s\n' \
+	'v2 @nocturneplus https://roach0816.github.io/NocturneConnectorPlus/apk/v3.24/main' \
+	>> /etc/apk/repositories
 
 printf '%s\n' legacy > /etc/nocturne-connector/api/legacy-file.ts
 printf '%s\n' legacy > /etc/nocturne-connector/version
@@ -87,6 +90,18 @@ if [ -z "$old_package" ]; then
 		legacy-site-config
 fi
 check_install
+test -x /usr/libexec/nocturne-connector-plus/install-connector-update
+curl -fsS --max-time 30 http://127.0.0.1/api/connector-update/status \
+	>/tmp/connector-update-status.json
+grep -Fq '"latestUpstreamVersion"' /tmp/connector-update-status.json
+grep -Fq '"availablePackageVersion"' /tmp/connector-update-status.json
+cross_origin_status=$(curl -sS --max-time 3 -o /tmp/connector-update-cross-origin.json \
+	-w '%{http_code}' -X POST -H 'Origin: https://example.invalid' \
+	http://127.0.0.1/api/connector-update/install)
+if [ "$cross_origin_status" != 403 ]; then
+	echo "Cross-origin update request returned HTTP $cross_origin_status instead of 403." >&2
+	exit 1
+fi
 
 if apk info -R nocturne-connector-plus | grep -Eq '(^|[[:space:]])(bash|git|npm|unzip)([[:space:]]|$)'; then
 	echo "A build-only dependency leaked into runtime dependencies." >&2

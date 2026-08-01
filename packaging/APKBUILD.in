@@ -6,7 +6,7 @@ pkgdesc="Package-managed Nocturne Connector application layer"
 url="https://github.com/roach0816/NocturneConnectorPlus"
 arch="aarch64"
 license="Apache-2.0"
-depends="bluez chrony curl dbus libgcc libstdc++ openrc wpa_supplicant"
+depends="apk-tools bluez chrony curl dbus libgcc libstdc++ openrc wpa_supplicant"
 makedepends="libgcc libstdc++ unzip"
 # Bun resolves registry dependencies from upstream's frozen lockfile during build.
 options="net !strip"
@@ -24,8 +24,10 @@ source="
 	$_bun_archive-$_bun_version.zip
 	connector-api.initd
 	connector-api.confd
+	nocturne-connector-plus.install-update
 	nocturne-connector-plus.protected-paths
 	nocturne-connector-plus.post-transaction
+	nocturne-connector-plus-updates.patch
 	release.env
 	"
 builddir="$srcdir/nocturne-connector-$_upstream_tag"
@@ -61,6 +63,8 @@ check() {
 	test -f "$builddir/src/dist/client/index.html"
 	test -d "$srcdir/runtime/node_modules"
 	test -f "$builddir/scripts/services/wifi-import.sh"
+	test -f "$builddir/src/server/routes/connector-update.ts"
+	grep -Fq 'Install Update' "$builddir/src/client/pages/Settings.tsx"
 	grep -Fq 'NOCTURNE_SITE_URL' "$builddir/src/server/config.ts"
 }
 
@@ -92,6 +96,8 @@ package() {
 		"$pkgdir/usr/libexec/nocturne-connector-plus/bun"
 	install -m 0755 "$srcdir/nocturne-connector-plus.post-transaction" \
 		"$pkgdir/usr/libexec/nocturne-connector-plus/post-transaction"
+	install -m 0755 "$srcdir/nocturne-connector-plus.install-update" \
+		"$pkgdir/usr/libexec/nocturne-connector-plus/install-connector-update"
 	install -m 0755 "$srcdir/connector-api.initd" \
 		"$pkgdir/etc/init.d/connector-api"
 	install -m 0644 "$srcdir/connector-api.confd" \

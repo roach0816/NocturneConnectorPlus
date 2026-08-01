@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+package=nocturne-connector-plus
+lock_dir=/run/nocturne-connector-plus-update.lock
+pid_file=/run/nocturne-connector-plus-update.pid
+log_file=/var/log/nocturne-connector-plus-update.log
+
+cleanup() {
+	rm -f "$pid_file"
+	rmdir "$lock_dir" 2>/dev/null || true
+}
+
+start_update() {
+	if ! mkdir "$lock_dir" 2>/dev/null; then
+		if [ -s "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+			echo "A Nocturne Connector Plus update is already running." >&2
+			exit 75
+		fi
+		rm -f "$pid_file"
+		rmdir "$lock_dir" 2>/dev/null || true
+		mkdir "$lock_dir"
+	fi
+
+	nohup "$0" run >>"$log_file" 2>&1 </dev/null &
+	update_pid=$!
+	if ! kill -0 "$update_pid" 2>/dev/null; then
+		cleanup
+		exit 1
+	fi
+	printf '%s\n' "$update_pid" > "$pid_file"
+	printf 'Started Nocturne Connector Plus update as PID %s.\n' "$update_pid"
+}
+
+run_update() {
+	trap cleanup EXIT INT TERM
+	umask 077
+	# Give Bun enough time to flush the HTTP response before apk's pre-upgrade
+	# hook intentionally stops connector-api.
+	sleep 10
+	printf '\n[%s] Checking the signed APK repository.\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	apk update
+	printf '[%s] Installing the latest signed Connector package.\n' \
+		"$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	apk upgrade "$package"
+	printf '[%s] Connector package update completed.\n' \
+		"$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+[ "$(id -u)" -eq 0 ] || {
+	echo "The Connector package updater must run as root." >&2
+	exit 1
+}
+
+case "${1:-}" in
+	start) start_update ;;
+	run) run_update ;;
+	*)
+		echo "Usage: $0 {start|run}" >&2
+		exit 2
+		;;
+esac

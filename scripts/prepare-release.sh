@@ -138,6 +138,7 @@ actual_bun_sha256=$(sha256sum "$output_dir/$bun_name" | awk '{print $1}')
 cp "$repo_dir"/packaging/connector-api.confd \
 	"$repo_dir"/packaging/connector-api.initd \
 	"$repo_dir"/packaging/nocturne-connector-plus.* \
+	"$repo_dir"/packaging/*.patch \
 	"$output_dir/"
 
 sed \

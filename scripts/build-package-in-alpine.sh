@@ -49,7 +49,8 @@ REPODEST="$OUTPUT_DIR"
 EOF
 chown builder:builder /home/builder/.abuild/abuild.conf
 
-for script in "$APORT_DIR"/*.initd "$APORT_DIR"/*.post-* "$APORT_DIR"/*.pre-*; do
+for script in "$APORT_DIR"/*.initd "$APORT_DIR"/*.install-update \
+	"$APORT_DIR"/*.post-* "$APORT_DIR"/*.pre-*; do
 	shellcheck -s sh "$script"
 done
 

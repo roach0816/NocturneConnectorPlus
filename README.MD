@@ -45,6 +45,15 @@ downgrades, troubleshooting, and disk expansion guidance.
 
 ## Normal package operations
 
+The Settings page checks both the latest stable release in the upstream
+`usenocturne/nocturne-connector` repository and the signed APK repository. It
+shows **Up to Date**, **Update Available**, or **Update Pending** next to the
+Connector version. **Install Update** appears only when the newer upstream or
+packaging release is present as a signed APK. The package update continues
+through the expected API restart and the page reconnects automatically.
+
+The equivalent command-line operations remain available:
+
 ```sh
 # Upgrade when you choose
 apk update

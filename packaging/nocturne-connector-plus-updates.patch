@@ -1,0 +1,451 @@
+--- a/src/server/index.ts
++++ b/src/server/index.ts
+@@ -13,6 +13,7 @@
+ import { createBluetoothRoutes } from "./routes/bluetooth";
+ import { createDeviceRoutes } from "./routes/device";
+ import { createAnalyticsRoutes } from "./routes/analytics";
++import { connectorUpdateRoutes } from "./routes/connector-update";
+ import { existsSync } from "fs";
+ 
+ const log = createLogger("Server");
+@@ -88,6 +89,7 @@
+     .use(createBluetoothRoutes(manager.bluetoothService))
+     .use(createDeviceRoutes(manager))
+     .use(createAnalyticsRoutes(manager.analyticsService))
++    .use(connectorUpdateRoutes)
+     .ws("/ws", {
+       open(ws) {
+         ws.subscribe(WS_TOPIC);
+--- /dev/null
++++ b/src/server/routes/connector-update.ts
+@@ -0,0 +1,229 @@
++import { Elysia } from "elysia";
++import { existsSync, readFileSync } from "fs";
++import { createLogger } from "../utils/logger";
++
++const PACKAGE_NAME = "nocturne-connector-plus";
++const UPDATE_HELPER =
++  "/usr/libexec/nocturne-connector-plus/install-connector-update";
++const UPDATE_LOCK = "/run/nocturne-connector-plus-update.lock";
++const UPSTREAM_RELEASE_URL =
++  "https://api.github.com/repos/usenocturne/nocturne-connector/releases/latest";
++const PACKAGE_VERSIONS_URL =
++  "https://roach0816.github.io/NocturneConnectorPlus/apk/versions.json";
++
++const log = createLogger("ConnectorUpdate");
++
++interface PackageRecord {
++  name: string;
++  version: string;
++}
++
++interface PackageProvenance {
++  upstream?: { tag?: string };
++  package?: { name?: string; version?: string };
++}
++
++interface UpstreamRelease {
++  tag_name?: string;
++  draft?: boolean;
++  prerelease?: boolean;
++}
++
++async function runCommand(command: string[]): Promise<string> {
++  const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
++  const [stdout, stderr, exitCode] = await Promise.all([
++    new Response(proc.stdout).text(),
++    new Response(proc.stderr).text(),
++    proc.exited,
++  ]);
++  if (exitCode !== 0) {
++    throw new Error(stderr.trim() || `${command[0]} exited with ${exitCode}`);
++  }
++  return stdout.trim();
++}
++
++function packageVersion(recordsJson: string): string | null {
++  const records = JSON.parse(recordsJson) as PackageRecord[];
++  return records.find((record) => record.name === PACKAGE_NAME)?.version ?? null;
++}
++
++async function fetchJson<T>(url: string): Promise<T> {
++  const response = await fetch(url, {
++    cache: "no-store",
++    headers: {
++      Accept: "application/vnd.github+json",
++      "User-Agent": "Nocturne-Connector-Plus",
++    },
++    signal: AbortSignal.timeout(15_000),
++  });
++  if (!response.ok) {
++    throw new Error(`Update metadata request returned HTTP ${response.status}`);
++  }
++  return (await response.json()) as T;
++}
++
++function currentUpstreamVersion(): string {
++  try {
++    return readFileSync("/etc/nocturne-connector/version", "utf-8").trim();
++  } catch {
++    return "unknown";
++  }
++}
++
++function isSameOriginRequest(request: Request): boolean {
++  const origin = request.headers.get("origin");
++  if (!origin) return true;
++  const host = request.headers.get("host");
++  try {
++    return new URL(origin).host === host;
++  } catch {
++    return false;
++  }
++}
++
++async function getUpdateStatus() {
++  if (existsSync(UPDATE_LOCK)) {
++    return {
++      status: "installing" as const,
++      currentVersion: currentUpstreamVersion(),
++      updateAvailable: false,
++      packagePending: false,
++      installing: true,
++      checkedAt: new Date().toISOString(),
++    };
++  }
++
++  await runCommand(["apk", "update"]);
++
++  const [installedJson, availableJson, upstream, provenance] = await Promise.all([
++    runCommand([
++      "apk",
++      "query",
++      "--from",
++      "installed",
++      "--fields",
++      "name,version",
++      "--format",
++      "json",
++      PACKAGE_NAME,
++    ]),
++    runCommand([
++      "apk",
++      "query",
++      "--from",
++      "repositories",
++      "--fields",
++      "name,version",
++      "--format",
++      "json",
++      PACKAGE_NAME,
++    ]),
++    fetchJson<UpstreamRelease>(UPSTREAM_RELEASE_URL),
++    fetchJson<PackageProvenance[]>(PACKAGE_VERSIONS_URL),
++  ]);
++
++  const installedPackageVersion = packageVersion(installedJson);
++  const availablePackageVersion = packageVersion(availableJson);
++  const latestUpstreamVersion = upstream.tag_name ?? "unknown";
++  const currentVersion = currentUpstreamVersion();
++
++  if (
++    upstream.draft ||
++    upstream.prerelease ||
++    !/^v\d+\.\d+\.\d+(?:-\d+)?$/.test(latestUpstreamVersion)
++  ) {
++    throw new Error("Upstream returned an unsupported release version");
++  }
++  if (!installedPackageVersion || !availablePackageVersion) {
++    throw new Error("Could not determine installed and available package versions");
++  }
++
++  const comparison = await runCommand([
++    "apk",
++    "version",
++    "--test",
++    availablePackageVersion,
++    installedPackageVersion,
++  ]);
++  const availableProvenance = provenance.find(
++    (entry) =>
++      entry.package?.name === PACKAGE_NAME &&
++      entry.package?.version === availablePackageVersion,
++  );
++  const packagedUpstreamVersion = availableProvenance?.upstream?.tag ?? null;
++  const updateAvailable = comparison === ">";
++  const upstreamAhead = latestUpstreamVersion !== currentVersion;
++  const packagePending =
++    upstreamAhead && packagedUpstreamVersion !== latestUpstreamVersion;
++
++  return {
++    status: updateAvailable
++      ? ("update_available" as const)
++      : packagePending
++        ? ("package_pending" as const)
++        : ("up_to_date" as const),
++    currentVersion,
++    installedPackageVersion,
++    latestUpstreamVersion,
++    availablePackageVersion,
++    packagedUpstreamVersion,
++    updateAvailable,
++    packagePending,
++    installing: false,
++    checkedAt: new Date().toISOString(),
++  };
++}
++
++let statusCheck: ReturnType<typeof getUpdateStatus> | null = null;
++
++function getCoalescedUpdateStatus() {
++  if (!statusCheck) {
++    statusCheck = getUpdateStatus().finally(() => {
++      statusCheck = null;
++    });
++  }
++  return statusCheck;
++}
++
++export const connectorUpdateRoutes = new Elysia({
++  prefix: "/api/connector-update",
++})
++  .get("/status", async ({ set }) => {
++    set.headers["cache-control"] = "no-store";
++    return getCoalescedUpdateStatus();
++  })
++  .post("/install", async ({ request, set }) => {
++    if (!isSameOriginRequest(request)) {
++      set.status = 403;
++      return { error: "Connector updates must be started from the local web interface" };
++    }
++    if (existsSync(UPDATE_LOCK)) {
++      set.status = 409;
++      return { error: "A Connector update is already running" };
++    }
++
++    const status = await getCoalescedUpdateStatus();
++    if (!status.updateAvailable) {
++      set.status = 409;
++      return { error: "No signed Connector package update is available" };
++    }
++    if (!existsSync(UPDATE_HELPER)) {
++      set.status = 500;
++      return { error: "The package update helper is not installed" };
++    }
++
++    try {
++      await runCommand([UPDATE_HELPER, "start"]);
++      log.info(
++        `Started package update from ${status.installedPackageVersion} to ${status.availablePackageVersion}`,
++      );
++      return {
++        status: "installing",
++        targetPackageVersion: status.availablePackageVersion,
++      };
++    } catch (error) {
++      log.error(`Could not start package update: ${error}`);
++      set.status = 500;
++      return { error: "Could not start the Connector update" };
++    }
++  });
+--- a/src/client/pages/Settings.tsx
++++ b/src/client/pages/Settings.tsx
+@@ -4,9 +4,17 @@
+ import { Card, CardContent } from "@/components/ui/card";
+ import { Button } from "@/components/ui/button";
+ import { Alert, AlertDescription } from "@/components/ui/alert";
++import { Badge } from "@/components/ui/badge";
+ import { Switch } from "@/components/ui/switch";
+-import { LogOut, Trash2, RotateCw, ExternalLink } from "lucide-react";
+ import {
++  Download,
++  ExternalLink,
++  LogOut,
++  RefreshCw,
++  RotateCw,
++  Trash2,
++} from "lucide-react";
++import {
+   AlertDialog,
+   AlertDialogAction,
+   AlertDialogCancel,
+@@ -18,6 +26,19 @@
+   AlertDialogTrigger,
+ } from "@/components/ui/alert-dialog";
+ 
++interface ConnectorUpdateStatus {
++  status: "up_to_date" | "update_available" | "package_pending" | "installing";
++  currentVersion: string;
++  installedPackageVersion?: string;
++  latestUpstreamVersion?: string;
++  availablePackageVersion?: string;
++  packagedUpstreamVersion?: string | null;
++  updateAvailable: boolean;
++  packagePending: boolean;
++  installing: boolean;
++  checkedAt: string;
++}
++
+ export function Settings() {
+   const { user, signOut, refresh } = useAuth();
+   const [info, setInfo] = useState<any>(null);
+@@ -26,9 +47,29 @@
+   const [deleteError, setDeleteError] = useState<string | null>(null);
+   const [analyticsEnabled, setAnalyticsEnabled] = useState<boolean | null>(null);
+   const [analyticsBusy, setAnalyticsBusy] = useState(false);
++  const [updateStatus, setUpdateStatus] = useState<ConnectorUpdateStatus | null>(null);
++  const [checkingUpdate, setCheckingUpdate] = useState(false);
++  const [installingUpdate, setInstallingUpdate] = useState(false);
++  const [updateError, setUpdateError] = useState<string | null>(null);
+ 
++  const checkConnectorUpdate = async () => {
++    if (checkingUpdate || installingUpdate) return;
++    setCheckingUpdate(true);
++    setUpdateError(null);
++    try {
++      const status = await get<ConnectorUpdateStatus>("/api/connector-update/status");
++      setUpdateStatus(status);
++      setInstallingUpdate(status.installing);
++    } catch (err: any) {
++      setUpdateError(err?.message ?? "Unable to check for Connector updates.");
++    } finally {
++      setCheckingUpdate(false);
++    }
++  };
++
+   useEffect(() => {
+     get("/api/info").then(setInfo).catch(() => { });
++    void checkConnectorUpdate();
+   }, []);
+ 
+   useEffect(() => {
+@@ -70,6 +111,42 @@
+     }
+   };
+ 
++  const handleInstallUpdate = async () => {
++    if (!updateStatus?.updateAvailable || installingUpdate) return;
++    setInstallingUpdate(true);
++    setUpdateError(null);
++    try {
++      await post("/api/connector-update/install");
++
++      // The package transaction intentionally restarts this API. Poll until
++      // the new process is healthy and reports that the signed update landed.
++      await new Promise((resolve) => setTimeout(resolve, 3000));
++      for (let attempt = 0; attempt < 90; attempt++) {
++        let status: ConnectorUpdateStatus | null = null;
++        try {
++          status = await get<ConnectorUpdateStatus>(
++            "/api/connector-update/status",
++          );
++          setUpdateStatus(status);
++        } catch {
++          // A short connection failure is expected while OpenRC restarts the API.
++        }
++        if (status && !status.installing) {
++          if (status.updateAvailable) {
++            throw new Error("The package update did not complete successfully.");
++          }
++          window.location.reload();
++          return;
++        }
++        await new Promise((resolve) => setTimeout(resolve, 2000));
++      }
++      throw new Error("Timed out waiting for the updated Connector to restart.");
++    } catch (err: any) {
++      setUpdateError(err?.message ?? "Unable to install the Connector update.");
++      setInstallingUpdate(false);
++    }
++  };
++
+   return (
+     <div>
+       <div className="mb-10">
+@@ -123,15 +200,77 @@
+           <Card>
+             <CardContent>
+               <div className="space-y-3">
+-                {[
+-                  ["Connector Version", info?.version ?? "Unknown"],
+-                  ["OS Version", info?.osVersion ?? "Unknown"],
+-                ].map(([label, value]) => (
+-                  <div key={label} className="flex items-center justify-between rounded-lg bg-bg px-3 py-2.5">
+-                    <span className="text-sm text-secondary">{label}</span>
+-                    <span className="text-sm font-medium text-fg">{value}</span>
++                <div className="rounded-lg bg-bg px-3 py-2.5">
++                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
++                    <span className="text-sm text-secondary">Connector Version</span>
++                    <div className="flex flex-wrap items-center gap-2">
++                      <span className="text-sm font-medium text-fg">
++                        {info?.version ?? "Unknown"}
++                      </span>
++                      {updateStatus && !updateStatus.installing && (
++                        <Badge
++                          variant={
++                            updateStatus.updateAvailable
++                              ? "default"
++                              : updateStatus.packagePending
++                                ? "secondary"
++                                : "success"
++                          }
++                        >
++                          {updateStatus.updateAvailable
++                            ? "Update Available"
++                            : updateStatus.packagePending
++                              ? "Update Pending"
++                              : "Up to Date"}
++                        </Badge>
++                      )}
++                      {(installingUpdate || updateStatus?.installing) && (
++                        <Badge variant="secondary">Installing Update</Badge>
++                      )}
++                      <Button
++                        variant="outline"
++                        size="xs"
++                        onClick={() => void checkConnectorUpdate()}
++                        disabled={checkingUpdate || installingUpdate}
++                      >
++                        <RefreshCw className={checkingUpdate ? "animate-spin" : ""} />
++                        {checkingUpdate ? "Checking..." : "Check for Updates"}
++                      </Button>
++                      {updateStatus?.updateAvailable && (
++                        <Button
++                          size="xs"
++                          onClick={() => void handleInstallUpdate()}
++                          disabled={installingUpdate}
++                        >
++                          <Download />
++                          {installingUpdate ? "Installing..." : "Install Update"}
++                        </Button>
++                      )}
++                    </div>
+                   </div>
+-                ))}
++                  {updateStatus?.latestUpstreamVersion && (
++                    <p className="mt-2 text-xs text-muted sm:text-right">
++                      Latest upstream release: {updateStatus.latestUpstreamVersion}
++                    </p>
++                  )}
++                  {updateStatus?.packagePending && (
++                    <p className="mt-2 text-xs text-secondary sm:text-right">
++                      A newer upstream release was found. Its signed package is
++                      awaiting publication.
++                    </p>
++                  )}
++                </div>
++                <div className="flex items-center justify-between rounded-lg bg-bg px-3 py-2.5">
++                  <span className="text-sm text-secondary">OS Version</span>
++                  <span className="text-sm font-medium text-fg">
++                    {info?.osVersion ?? "Unknown"}
++                  </span>
++                </div>
++                {updateError && (
++                  <Alert variant="destructive">
++                    <AlertDescription>{updateError}</AlertDescription>
++                  </Alert>
++                )}
+               </div>
+             </CardContent>
+           </Card>
+

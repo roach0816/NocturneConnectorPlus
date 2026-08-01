@@ -161,7 +161,20 @@ NOCTURNE_SITE_URL=https://usenocturne.com
 
 ## 6. Upgrade when you choose
 
-Repository publishing is automatic; installation on the Connector is manual:
+The Settings page automatically checks GitHub's latest stable upstream release
+and refreshes the signed APK repository. Beside **Connector Version**, it shows:
+
+- **Up to Date** when the installed signed package is current.
+- **Update Available** with an **Install Update** button when a newer signed APK
+  can be installed.
+- **Update Pending** when upstream has released a newer version but repository
+  automation has not published its signed APK yet.
+
+Installing from the web interface briefly restarts the API. The page polls for
+the new process and reloads when the package health check passes. Detailed
+output is written to `/var/log/nocturne-connector-plus-update.log`.
+
+The equivalent command-line operation is:
 
 ```sh
 apk update

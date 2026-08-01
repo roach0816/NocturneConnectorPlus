@@ -47,6 +47,7 @@ jobs:
             scripts/build-package-in-alpine.sh \
             scripts/test-package-in-alpine.sh \
             packaging/connector-api.initd \
+            packaging/nocturne-connector-plus.install-update \
             packaging/nocturne-connector-plus.post-* \
             packaging/nocturne-connector-plus.pre-*
           shellcheck -s bash scripts/assemble-repository.sh
