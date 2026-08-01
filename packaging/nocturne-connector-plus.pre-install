@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+rules=/etc/apk/protected_paths.d/nocturne-connector-plus.list
+if [ ! -f "$rules" ] \
+	|| ! grep -Fxq -- '-etc/nocturne-connector/api' "$rules" \
+	|| ! grep -Fxq -- '-etc/nocturne-connector/version' "$rules"; then
+	cat >&2 <<'EOF'
+ERROR: The Nocturne Connector Plus APK protected-path rules are not installed.
+Follow the repository setup guide before running apk add. This safety check
+prevents application files from being installed as .apk-new files.
+EOF
+	exit 1
+fi
+
+rc-service connector-api stop >/dev/null 2>&1 || true
+# The image's original version marker is unowned and protected. It is not
+# persistent user state; remove it immediately before APK installs its managed
+# replacement so Alpine cannot divert that replacement to version.apk-new.
+rm -f /etc/nocturne-connector/version \
+	/etc/nocturne-connector/version.apk-new
+exit 0

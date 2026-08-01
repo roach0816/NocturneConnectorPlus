@@ -1,0 +1,327 @@
+name: Publish Alpine APK repository
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream release tag; blank selects the latest stable release"
+        required: false
+        type: string
+      pkgrel:
+        description: "Alpine packaging revision"
+        required: true
+        default: "0"
+        type: string
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: nocturne-apk-repository
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate repository shell scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck -s sh \
+            scripts/prepare-release.sh \
+            scripts/build-package-in-alpine.sh \
+            scripts/test-package-in-alpine.sh \
+            packaging/connector-api.initd \
+            packaging/nocturne-connector-plus.post-* \
+            packaging/nocturne-connector-plus.pre-*
+          shellcheck -s bash scripts/assemble-repository.sh
+
+      - name: Resolve and prepare upstream release
+        id: release
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+          REQUESTED_PKGREL: ${{ inputs.pkgrel }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          if [[ -z "$tag" ]]; then
+            tag=$(curl -fsSL \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/usenocturne/nocturne-connector/releases/latest \
+              | jq -r '.tag_name')
+          fi
+          pkgrel=${REQUESTED_PKGREL:-0}
+          aport_dir="$RUNNER_TEMP/aport"
+          scripts/prepare-release.sh "$tag" "$pkgrel" "$aport_dir"
+          source "$aport_dir/release.env"
+          {
+            echo "upstream_tag=$UPSTREAM_TAG"
+            echo "upstream_commit=$UPSTREAM_COMMIT"
+            echo "pkgver=$PKGVER"
+            echo "pkgrel=$PKGREL"
+            echo "package_release=$PACKAGE_RELEASE"
+            echo "bun_version=$BUN_VERSION"
+            echo "aport_dir=$aport_dir"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check release immutability
+        id: existing
+        shell: bash
+        env:
+          PACKAGE_RELEASE: ${{ steps.release.outputs.package_release }}
+          EXPECTED_COMMIT: ${{ steps.release.outputs.upstream_commit }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$PACKAGE_RELEASE" >/dev/null 2>&1; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          check_dir="$RUNNER_TEMP/existing-release"
+          mkdir -p "$check_dir"
+          gh release download "$PACKAGE_RELEASE" --dir "$check_dir" \
+            --pattern '*.provenance.json'
+          recorded_commit=$(jq -r '.upstream.commit' \
+            "$check_dir"/*.provenance.json)
+          if [[ "$recorded_commit" != "$EXPECTED_COMMIT" ]]; then
+            echo "Published package $PACKAGE_RELEASE points to $recorded_commit," >&2
+            echo "but upstream tag now points to $EXPECTED_COMMIT. Refusing overwrite." >&2
+            exit 1
+          fi
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+
+      - name: Load and verify signing key
+        if: steps.existing.outputs.exists != 'true' || github.event_name == 'workflow_dispatch'
+        id: signing
+        shell: bash
+        env:
+          PRIVATE_KEY_B64: ${{ secrets.ABUILD_PRIVATE_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$PRIVATE_KEY_B64" ]] || {
+            echo "ABUILD_PRIVATE_KEY_B64 is not configured." >&2
+            exit 1
+          }
+          key_path="$RUNNER_TEMP/nocturne-connector-plus.rsa"
+          printf '%s' "$PRIVATE_KEY_B64" | base64 --decode > "$key_path"
+          chmod 0600 "$key_path"
+          openssl rsa -in "$key_path" -pubout -out "$RUNNER_TEMP/derived.rsa.pub" \
+            2>/dev/null
+          cmp "$RUNNER_TEMP/derived.rsa.pub" \
+            keys/nocturne-connector-plus.rsa.pub
+          echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed APK
+        if: steps.existing.outputs.exists != 'true'
+        id: build
+        shell: bash
+        env:
+          APORT_DIR: ${{ steps.release.outputs.aport_dir }}
+          PRIVATE_KEY: ${{ steps.signing.outputs.key_path }}
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/packages"
+          mkdir -p "$output_dir"
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/workspace:ro" \
+            -v "$APORT_DIR:/work/aport" \
+            -v "$output_dir:/work/output" \
+            -v "$PRIVATE_KEY:/run/secrets/nocturne-connector-plus.rsa:ro" \
+            -e APORT_DIR=/work/aport \
+            -e OUTPUT_DIR=/work/output \
+            -e ABUILD_PRIVATE_KEY_FILE=/run/secrets/nocturne-connector-plus.rsa \
+            alpine:3.24 \
+            sh /workspace/scripts/build-package-in-alpine.sh
+          apk_path=$(find "$output_dir" -type f \
+            -name 'nocturne-connector-plus-*.apk' -print -quit)
+          [[ -n "$apk_path" ]] || {
+            echo "Signed APK was not produced." >&2
+            exit 1
+          }
+          echo "apk_path=$apk_path" >> "$GITHUB_OUTPUT"
+
+      - name: Download previous package for downgrade test
+        if: steps.existing.outputs.exists != 'true'
+        id: previous
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_tag=$(gh release list --limit 100 \
+            --json tagName,publishedAt,isDraft,isPrerelease \
+            | jq -r '
+                map(select(
+                  (.isDraft | not) and
+                  (.isPrerelease | not) and
+                  (.tagName | startswith("apk-"))
+                ))
+                | sort_by(.publishedAt)
+                | reverse
+                | .[0].tagName // empty')
+          if [[ -z "$previous_tag" ]]; then
+            echo "apk_path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          previous_dir="$RUNNER_TEMP/previous-package"
+          mkdir -p "$previous_dir"
+          gh release download "$previous_tag" --dir "$previous_dir" \
+            --pattern 'nocturne-connector-plus-*.apk'
+          previous_apk=$(find "$previous_dir" -type f -name '*.apk' -print -quit)
+          echo "apk_path=$previous_apk" >> "$GITHUB_OUTPUT"
+
+      - name: Test install, runtime, upgrade, downgrade, and state retention
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        env:
+          NEW_APK: ${{ steps.build.outputs.apk_path }}
+          OLD_APK: ${{ steps.previous.outputs.apk_path }}
+        run: |
+          set -euo pipefail
+          test_dir="$RUNNER_TEMP/package-tests"
+          mkdir -p "$test_dir"
+          cp "$NEW_APK" "$test_dir/new.apk"
+          args=(/packages/new.apk)
+          if [[ -n "$OLD_APK" ]]; then
+            cp "$OLD_APK" "$test_dir/old.apk"
+            args+=(/packages/old.apk)
+          fi
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/workspace:ro" \
+            -v "$test_dir:/packages:ro" \
+            alpine:3.24 \
+            sh /workspace/scripts/test-package-in-alpine.sh "${args[@]}"
+
+      - name: Create release provenance
+        if: steps.existing.outputs.exists != 'true'
+        id: provenance
+        shell: bash
+        env:
+          APORT_DIR: ${{ steps.release.outputs.aport_dir }}
+          APK_PATH: ${{ steps.build.outputs.apk_path }}
+        run: |
+          set -euo pipefail
+          source "$APORT_DIR/release.env"
+          package_sha256=$(sha256sum "$APK_PATH" | awk '{print $1}')
+          provenance="$RUNNER_TEMP/nocturne-connector-plus-$PKGVER-r$PKGREL.provenance.json"
+          jq -n \
+            --arg upstream_tag "$UPSTREAM_TAG" \
+            --arg upstream_commit "$UPSTREAM_COMMIT" \
+            --arg upstream_published_at "$UPSTREAM_PUBLISHED_AT" \
+            --arg source_sha256 "$SOURCE_SHA256" \
+            --arg bun_version "$BUN_VERSION" \
+            --arg bun_sha256 "$BUN_SHA256" \
+            --arg package_version "$PKGVER-r$PKGREL" \
+            --arg package_sha256 "$package_sha256" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{
+              schemaVersion: 1,
+              upstream: {
+                repository: "usenocturne/nocturne-connector",
+                tag: $upstream_tag,
+                commit: $upstream_commit,
+                publishedAt: $upstream_published_at,
+                sourceSha256: $source_sha256
+              },
+              runtime: {
+                name: "bun-linux-aarch64-musl",
+                version: $bun_version,
+                sha256: $bun_sha256
+              },
+              package: {
+                name: "nocturne-connector-plus",
+                version: $package_version,
+                architecture: "aarch64",
+                alpineBaseline: "3.24",
+                sha256: $package_sha256
+              },
+              build: { workflowRun: $run_url }
+            }' > "$provenance"
+          cp "$APORT_DIR/APKBUILD" \
+            "$RUNNER_TEMP/nocturne-connector-plus-$PKGVER-r$PKGREL.APKBUILD"
+          {
+            echo "path=$provenance"
+            echo "apkbuild=$RUNNER_TEMP/nocturne-connector-plus-$PKGVER-r$PKGREL.APKBUILD"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable package release
+        if: steps.existing.outputs.exists != 'true'
+        id: package_publish
+        shell: bash
+        env:
+          PACKAGE_RELEASE: ${{ steps.release.outputs.package_release }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+          APK_PATH: ${{ steps.build.outputs.apk_path }}
+          PROVENANCE_PATH: ${{ steps.provenance.outputs.path }}
+          APKBUILD_PATH: ${{ steps.provenance.outputs.apkbuild }}
+        run: |
+          set -euo pipefail
+          gh release create "$PACKAGE_RELEASE" \
+            "$APK_PATH" "$PROVENANCE_PATH" "$APKBUILD_PATH" \
+            --title "Nocturne Connector Plus $PACKAGE_RELEASE" \
+            --notes "Signed Alpine aarch64 package built from upstream $UPSTREAM_TAG."
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble retained APK repository
+        if: steps.package_publish.outputs.created == 'true' || github.event_name == 'workflow_dispatch'
+        id: repository
+        shell: bash
+        env:
+          PRIVATE_KEY: ${{ steps.signing.outputs.key_path }}
+        run: |
+          set -euo pipefail
+          site_dir="$RUNNER_TEMP/site"
+          scripts/assemble-repository.sh "$site_dir" "$PRIVATE_KEY" \
+            keys/nocturne-connector-plus.rsa.pub
+          echo "site_dir=$site_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Configure GitHub Pages
+        if: steps.repository.outputs.site_dir != ''
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        if: steps.repository.outputs.site_dir != ''
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ steps.repository.outputs.site_dir }}
+
+      - name: Deploy GitHub Pages
+        if: steps.repository.outputs.site_dir != ''
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Record monthly scheduler heartbeat
+        if: github.event_name == 'schedule'
+        continue-on-error: true
+        shell: bash
+        env:
+          OBSERVED_TAG: ${{ steps.release.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          [[ $(date -u +%d) == 01 ]] || exit 0
+          jq -n \
+            --arg checked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg release "$OBSERVED_TAG" \
+            '{lastScheduledCheck: $checked, lastObservedRelease: $release}' \
+            > .automation/upstream-state.json
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .automation/upstream-state.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: record APK publisher heartbeat [skip ci]"
+          git push origin HEAD:${GITHUB_DEFAULT_BRANCH:-main}

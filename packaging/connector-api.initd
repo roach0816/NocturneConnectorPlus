@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+# shellcheck shell=ash
+# shellcheck disable=SC2034
+
+description="Nocturne Connector Plus API"
+directory="/etc/nocturne-connector/api"
+command="/usr/libexec/nocturne-connector-plus/bun"
+command_args="run server/index.ts"
+pidfile="/run/connector-api.pid"
+command_background=true
+output_log="/var/log/connector-api.log"
+error_log="/var/log/connector-api.log"
+
+export NOCTURNE_SITE_URL="${NOCTURNE_SITE_URL:-https://usenocturne.com}"
+
+depend() {
+	need net dbus
+	use logger wpa_supplicant bluetooth chronyd
+	after wpa_supplicant bluetooth chronyd
+}
+

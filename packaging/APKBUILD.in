@@ -1,0 +1,104 @@
+# Maintainer: Colin Roach <roach0816@users.noreply.github.com>
+pkgname=nocturne-connector-plus
+pkgver=@PKGVER@
+pkgrel=@PKGREL@
+pkgdesc="Package-managed Nocturne Connector application layer"
+url="https://github.com/roach0816/NocturneConnectorPlus"
+arch="aarch64"
+license="Apache-2.0"
+depends="bluez chrony curl dbus libgcc libstdc++ openrc wpa_supplicant"
+makedepends="libgcc libstdc++ unzip"
+# Bun resolves registry dependencies from upstream's frozen lockfile during build.
+options="net !strip"
+install="$pkgname.pre-install $pkgname.post-install
+	$pkgname.pre-upgrade $pkgname.post-upgrade
+	$pkgname.pre-deinstall $pkgname.post-deinstall"
+
+_upstream_tag="@UPSTREAM_TAG@"
+_upstream_commit="@UPSTREAM_COMMIT@"
+_bun_version="@BUN_VERSION@"
+_bun_archive="bun-linux-aarch64-musl"
+
+source="
+	nocturne-connector-$_upstream_tag.tar.gz
+	$_bun_archive-$_bun_version.zip
+	connector-api.initd
+	connector-api.confd
+	nocturne-connector-plus.protected-paths
+	nocturne-connector-plus.post-transaction
+	release.env
+	"
+builddir="$srcdir/nocturne-connector-$_upstream_tag"
+
+build() {
+	local bun="$srcdir/$_bun_archive/bun"
+	local runtime="$srcdir/runtime"
+
+	[ -x "$bun" ]
+	export PATH="$srcdir/$_bun_archive:$PATH"
+	cd "$builddir/src"
+	"$bun" install --frozen-lockfile
+	"$bun" run check
+	"$bun" run build
+
+	rm -rf "$runtime"
+	mkdir -p "$runtime"
+	cp package.json bun.lock bunfig.toml "$runtime"/
+	cd "$runtime"
+	"$bun" install --frozen-lockfile --production
+
+	# Bun currently installs both glibc and musl optional native variants on
+	# Alpine. Keep only the musl variants; glibc ELFs are unusable on the target
+	# and would create an invalid libc.so.6 dependency in the APK.
+	rm -rf \
+		"$runtime/node_modules/lightningcss-linux-arm64-gnu" \
+		"$runtime/node_modules/@rollup/rollup-linux-arm64-gnu" \
+		"$runtime/node_modules/@tailwindcss/oxide-linux-arm64-gnu"
+}
+
+check() {
+	test -f "$builddir/src/server/index.ts"
+	test -f "$builddir/src/dist/client/index.html"
+	test -d "$srcdir/runtime/node_modules"
+	test -f "$builddir/scripts/services/wifi-import.sh"
+	grep -Fq 'NOCTURNE_SITE_URL' "$builddir/src/server/config.ts"
+}
+
+package() {
+	install -d \
+		"$pkgdir/etc/conf.d" \
+		"$pkgdir/etc/init.d" \
+		"$pkgdir/etc/nocturne-connector/api/dist" \
+		"$pkgdir/usr/libexec/nocturne-connector-plus"
+
+	cp -a "$builddir/src/server" \
+		"$pkgdir/etc/nocturne-connector/api/"
+	cp -a "$builddir/src/dist/client" \
+		"$pkgdir/etc/nocturne-connector/api/dist/"
+	cp -a "$srcdir/runtime/node_modules" \
+		"$pkgdir/etc/nocturne-connector/api/"
+	install -m 0644 "$builddir/src/package.json" \
+		"$pkgdir/etc/nocturne-connector/api/package.json"
+	install -m 0644 "$builddir/src/tsconfig.json" \
+		"$pkgdir/etc/nocturne-connector/api/tsconfig.json"
+	install -m 0644 "$builddir/src/bun.lock" \
+		"$pkgdir/etc/nocturne-connector/api/bun.lock"
+	install -m 0644 "$builddir/src/bunfig.toml" \
+		"$pkgdir/etc/nocturne-connector/api/bunfig.toml"
+	printf '%s\n' "$_upstream_tag" > \
+		"$pkgdir/etc/nocturne-connector/version"
+
+	install -m 0755 "$srcdir/$_bun_archive/bun" \
+		"$pkgdir/usr/libexec/nocturne-connector-plus/bun"
+	install -m 0755 "$srcdir/nocturne-connector-plus.post-transaction" \
+		"$pkgdir/usr/libexec/nocturne-connector-plus/post-transaction"
+	install -m 0755 "$srcdir/connector-api.initd" \
+		"$pkgdir/etc/init.d/connector-api"
+	install -m 0644 "$srcdir/connector-api.confd" \
+		"$pkgdir/etc/conf.d/connector-api"
+	install -m 0755 "$builddir/scripts/services/wifi-import.sh" \
+		"$pkgdir/etc/init.d/wifi-import"
+}
+
+# Filled by `abuild checksum` in the isolated release build directory.
+sha512sums=""

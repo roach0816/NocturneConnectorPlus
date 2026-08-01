@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+exec /usr/libexec/nocturne-connector-plus/post-transaction install "$1"
+

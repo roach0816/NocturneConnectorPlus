@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+rc-service connector-api stop >/dev/null 2>&1 || true
+rc-update del connector-api default >/dev/null 2>&1 || true
+rc-update del wifi-import boot >/dev/null 2>&1 || true
+exit 0
+

@@ -1,0 +1,4 @@
+# Application files are package payload, not administrator configuration.
+-etc/nocturne-connector/api
+-etc/nocturne-connector/version
+

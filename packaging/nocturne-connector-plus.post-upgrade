@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+exec /usr/libexec/nocturne-connector-plus/post-transaction upgrade "$1" "$2"
+

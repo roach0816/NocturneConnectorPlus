@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+action="${1:-install}"
+new_version="${2:-unknown}"
+old_version="${3:-}"
+
+rc-update add connector-api default >/dev/null 2>&1 || true
+rc-update add wifi-import boot >/dev/null 2>&1 || true
+
+if [ -x /usr/local/sbin/nocturne-update ]; then
+	cat >&2 <<'EOF'
+NOTICE: /usr/local/sbin/nocturne-update still exists.
+The APK repository now owns application upgrades. Do not use the legacy updater
+while nocturne-connector-plus is installed.
+EOF
+fi
+
+if ! rc-service connector-api start; then
+	echo "ERROR: connector-api could not be started after package $action." >&2
+	exit 1
+fi
+
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+	if curl -fsS --max-time 3 http://127.0.0.1/api/info >/dev/null 2>&1; then
+		printf 'Nocturne Connector Plus %s completed; API health check passed.\n' \
+			"$action"
+		exit 0
+	fi
+	attempt=$((attempt + 1))
+	sleep 1
+done
+
+echo "ERROR: connector-api did not pass its health check for $new_version." >&2
+if [ -n "$old_version" ]; then
+	cat >&2 <<EOF
+The package is installed but marked broken. After reviewing the service log,
+downgrade with:
+  apk add 'nocturne-connector-plus@nocturneplus=$old_version'
+EOF
+else
+	echo "Review /var/log/connector-api.log, then run apk fix after correction." >&2
+fi
+exit 1
