@@ -4,8 +4,25 @@ set -euo pipefail
 : "${GH_TOKEN:?Set GH_TOKEN for GitHub release downloads}"
 
 site_dir=${1:?Usage: assemble-repository.sh SITE_DIR PRIVATE_KEY PUBLIC_KEY}
-private_key=${2:?Usage: assemble-repository.sh SITE_DIR PRIVATE_KEY PUBLIC_KEY}
-public_key=${3:?Usage: assemble-repository.sh SITE_DIR PRIVATE_KEY PUBLIC_KEY}
+private_key_input=${2:?Usage: assemble-repository.sh SITE_DIR PRIVATE_KEY PUBLIC_KEY}
+public_key_input=${3:?Usage: assemble-repository.sh SITE_DIR PRIVATE_KEY PUBLIC_KEY}
+
+absolute_file() {
+	local input=$1
+	local directory filename
+	[ -f "$input" ] || {
+		echo "Required file not found: $input" >&2
+		exit 1
+	}
+	directory=$(dirname "$input")
+	filename=$(basename "$input")
+	printf '%s/%s\n' "$(cd "$directory" && pwd)" "$filename"
+}
+
+# Docker bind mounts require absolute host paths. The workflow intentionally
+# passes the committed public key as a repository-relative path.
+private_key=$(absolute_file "$private_key_input")
+public_key=$(absolute_file "$public_key_input")
 
 repo_dir="$site_dir/apk/v3.24/main/aarch64"
 metadata_dir="$site_dir/apk/metadata"
