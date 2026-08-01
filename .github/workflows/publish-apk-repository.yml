@@ -292,18 +292,18 @@ jobs:
 
       - name: Configure GitHub Pages
         if: steps.repository.outputs.site_dir != ''
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload GitHub Pages artifact
         if: steps.repository.outputs.site_dir != ''
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ${{ steps.repository.outputs.site_dir }}
 
       - name: Deploy GitHub Pages
         if: steps.repository.outputs.site_dir != ''
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       - name: Record monthly scheduler heartbeat
         if: github.event_name == 'schedule'
