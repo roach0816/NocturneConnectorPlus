@@ -39,8 +39,11 @@ apk verify "$new_package"
 [ -z "$old_package" ] || apk verify "$old_package"
 
 check_install() {
+	expect_plus_version=${1:-false}
 	test -x /usr/libexec/nocturne-connector-plus/bun
-	test -f /usr/libexec/nocturne-connector-plus/package-version
+	if [ "$expect_plus_version" = true ]; then
+		test -f /usr/libexec/nocturne-connector-plus/package-version
+	fi
 	test -f /etc/nocturne-connector/api/server/index.ts
 	test -f /etc/nocturne-connector/api/dist/client/index.html
 	test "$(cat /etc/nocturne-connector/auth-session.json)" = auth-state
@@ -65,7 +68,9 @@ check_install() {
 	curl -fsS --max-time 3 http://127.0.0.1/api/info \
 		>/tmp/connector-info.json
 	grep -Fq '"version"' /tmp/connector-info.json
-	grep -Fq '"plusVersion"' /tmp/connector-info.json
+	if [ "$expect_plus_version" = true ]; then
+		grep -Fq '"plusVersion"' /tmp/connector-info.json
+	fi
 
 	service_pid=$(cat /run/connector-api.pid)
 	tr '\000' '\n' < "/proc/$service_pid/environ" \
@@ -91,7 +96,7 @@ if [ -z "$old_package" ]; then
 	test "$(cat /etc/nocturne-connector/pre-apk-service-backup/conf.d.connector-api)" = \
 		legacy-site-config
 fi
-check_install
+check_install true
 test -x /usr/libexec/nocturne-connector-plus/install-connector-update
 curl -fsS --max-time 3 http://127.0.0.1/api/connector-update/status \
 	>/tmp/connector-update-status.json
