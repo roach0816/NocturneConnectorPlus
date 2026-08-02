@@ -29,6 +29,7 @@ source="
 	nocturne-connector-plus.post-transaction
 	nocturne-connector-plus-bluetooth.patch
 	nocturne-connector-plus-updates.patch
+	nocturne-connector-plus-settings.patch
 	release.env
 	"
 builddir="$srcdir/nocturne-connector-$_upstream_tag"
@@ -66,6 +67,8 @@ check() {
 	test -f "$builddir/scripts/services/wifi-import.sh"
 	test -f "$builddir/src/server/routes/connector-update.ts"
 	grep -Fq 'Install Update' "$builddir/src/client/pages/Settings.tsx"
+	grep -Fq 'Nocturne Connector Plus' \
+		"$builddir/src/client/pages/Settings.tsx"
 	grep -Fq 'NOCTURNE_SITE_URL' "$builddir/src/server/config.ts"
 	grep -Fq 'private connectPromise' \
 		"$builddir/src/server/bluetooth/rfcomm-client.ts"

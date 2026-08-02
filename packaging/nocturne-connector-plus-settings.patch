@@ -1,0 +1,74 @@
+--- a/src/client/pages/Settings.tsx
++++ b/src/client/pages/Settings.tsx
+@@ -209,6 +209,71 @@
+                     <span className="text-sm font-medium text-fg">{value}</span>
+                   </div>
+                 ))}
++                <div className="rounded-lg bg-bg px-3 py-2.5">
++                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
++                    <span className="text-sm text-secondary">Nocturne Connector Plus</span>
++                    <div className="flex flex-wrap items-center justify-end gap-2">
++                      {updateStatus && !updateStatus.installing && (
++                        <Badge
++                          variant={
++                            updateStatus.updateAvailable
++                              ? "default"
++                              : updateStatus.packagePending
++                                ? "secondary"
++                                : "success"
++                          }
++                        >
++                          {updateStatus.updateAvailable
++                            ? "Update Available"
++                            : updateStatus.packagePending
++                              ? "Update Pending"
++                              : "Up to Date"}
++                        </Badge>
++                      )}
++                      {(installingUpdate || updateStatus?.installing) && (
++                        <Badge variant="secondary">Installing Update</Badge>
++                      )}
++                      <Button
++                        variant="outline"
++                        size="xs"
++                        onClick={() => void checkConnectorUpdate()}
++                        disabled={checkingUpdate || installingUpdate}
++                      >
++                        <RefreshCw className={checkingUpdate ? "animate-spin" : ""} />
++                        {checkingUpdate ? "Checking..." : "Check for Updates"}
++                      </Button>
++                      {updateStatus?.updateAvailable && (
++                        <Button
++                          size="xs"
++                          onClick={() => void handleInstallUpdate()}
++                          disabled={installingUpdate}
++                        >
++                          <Download />
++                          {installingUpdate ? "Installing..." : "Install Update"}
++                        </Button>
++                      )}
++                      <span className="min-w-24 text-right text-sm font-medium text-fg">
++                        {updateStatus?.installedPackageVersion ?? "Unknown"}
++                      </span>
++                    </div>
++                  </div>
++                  {updateStatus?.latestUpstreamVersion && (
++                    <p className="mt-2 text-xs text-muted sm:text-right">
++                      Latest upstream Connector: {updateStatus.latestUpstreamVersion}
++                    </p>
++                  )}
++                  {updateStatus?.packagePending && (
++                    <p className="mt-2 text-xs text-secondary sm:text-right">
++                      A newer upstream release was found. Its signed package is
++                      awaiting publication.
++                    </p>
++                  )}
++                </div>
++                {updateError && (
++                  <Alert variant="destructive">
++                    <AlertDescription>{updateError}</AlertDescription>
++                  </Alert>
++                )}
+               </div>
+             </CardContent>
+           </Card>
