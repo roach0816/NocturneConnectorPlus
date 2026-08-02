@@ -27,6 +27,7 @@ source="
 	nocturne-connector-plus.install-update
 	nocturne-connector-plus.protected-paths
 	nocturne-connector-plus.post-transaction
+	nocturne-connector-plus-bluetooth.patch
 	nocturne-connector-plus-updates.patch
 	release.env
 	"
@@ -66,6 +67,12 @@ check() {
 	test -f "$builddir/src/server/routes/connector-update.ts"
 	grep -Fq 'Install Update' "$builddir/src/client/pages/Settings.tsx"
 	grep -Fq 'NOCTURNE_SITE_URL' "$builddir/src/server/config.ts"
+	grep -Fq 'private connectPromise' \
+		"$builddir/src/server/bluetooth/rfcomm-client.ts"
+	grep -Fq 'scheduleReconnect' \
+		"$builddir/src/server/services/bluetooth-service.ts"
+	! grep -Fq 'read as fsRead' \
+		"$builddir/src/server/bluetooth/rfcomm-client.ts"
 }
 
 package() {

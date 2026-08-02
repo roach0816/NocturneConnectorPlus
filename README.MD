@@ -111,6 +111,12 @@ To prepare a release locally without publishing:
 scripts/prepare-release.sh v2.0.4-1 .work/aport
 ```
 
+Repository-owned application fixes use Alpine's `pkgrel` without changing the
+upstream Connector version. For example, publish the Bluetooth reliability fix
+for upstream `v2.0.4-1` by manually dispatching the workflow with tag
+`v2.0.4-1` and the next unused packaging revision. Published revisions are
+immutable, so never reuse an existing `pkgrel`.
+
 The generated directory contains an immutable source archive, verified Bun
 archive, rendered `APKBUILD`, lifecycle files, and `release.env`. The actual APK
 build must run natively on Alpine `aarch64` with an abuild signing key.
