@@ -69,6 +69,7 @@ check() {
 	grep -Fq 'Install Update' "$builddir/src/client/pages/Settings.tsx"
 	grep -Fq 'Nocturne Connector Plus' \
 		"$builddir/src/client/pages/Settings.tsx"
+	grep -Fq 'plusVersion' "$builddir/src/server/routes/info.ts"
 	grep -Fq 'NOCTURNE_SITE_URL' "$builddir/src/server/config.ts"
 	grep -Fq 'private connectPromise' \
 		"$builddir/src/server/bluetooth/rfcomm-client.ts"
@@ -101,6 +102,8 @@ package() {
 		"$pkgdir/etc/nocturne-connector/api/bunfig.toml"
 	printf '%s\n' "$_upstream_tag" > \
 		"$pkgdir/etc/nocturne-connector/version"
+	printf '%s-r%s\n' "$pkgver" "$pkgrel" > \
+		"$pkgdir/usr/libexec/nocturne-connector-plus/package-version"
 
 	install -m 0755 "$srcdir/$_bun_archive/bun" \
 		"$pkgdir/usr/libexec/nocturne-connector-plus/bun"
