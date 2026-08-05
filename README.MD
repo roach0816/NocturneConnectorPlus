@@ -1,5 +1,11 @@
 # Nocturne Connector Plus
 
+> [!IMPORTANT]
+> **This project is no longer under active development.** Starting with
+> Nocturne Connector 2.1.0, Nocturne provides the core update capabilities
+> that this project was created to add. New installations should use the
+> official Nocturne image and its native update system.
+
 Nocturne Connector Plus packages the upstream Nocturne Connector application
 layer as a normal, signed Alpine Linux package. The Connector host no longer
 needs Git, a compiler toolchain, Bun's package cache, or several gigabytes of
