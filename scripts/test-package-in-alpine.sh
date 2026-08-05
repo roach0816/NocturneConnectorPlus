@@ -46,6 +46,11 @@ check_install() {
 	fi
 	test -f /etc/nocturne-connector/api/server/index.ts
 	test -f /etc/nocturne-connector/api/dist/client/index.html
+	if grep -Eq '(^|[[:space:]])connector-data([[:space:]]|$)' \
+		/etc/init.d/wifi-import; then
+		echo "Wi-Fi import unexpectedly depends on the image-only connector-data service." >&2
+		exit 1
+	fi
 	test "$(cat /etc/nocturne-connector/auth-session.json)" = auth-state
 	test "$(cat /etc/nocturne-connector/setup-state.json)" = setup-state
 	test "$(cat /etc/nocturne-connector/analytics-enabled.json)" = analytics-state
@@ -101,18 +106,20 @@ test -x /usr/libexec/nocturne-connector-plus/install-connector-update
 curl -fsS --max-time 3 http://127.0.0.1/api/connector-update/status \
 	>/tmp/connector-update-status.json
 installed_version=$(cat /usr/libexec/nocturne-connector-plus/package-version)
+current_version=$(cat /etc/nocturne-connector/version)
 grep -Fq "\"installedPackageVersion\":\"$installed_version\"" \
 	/tmp/connector-update-status.json
 # This test APK uses an ephemeral key, so the production repository index is
 # intentionally untrusted here. Seed the persisted cache to exercise the cheap
 # GET path independently of a remote apk update.
 mkdir -p /var/cache/nocturne-connector-plus
-printf '{"status":"up_to_date","currentVersion":"v2.0.4-1","installedPackageVersion":"%s","latestUpstreamVersion":"v2.0.4-1","availablePackageVersion":"%s","packagedUpstreamVersion":"v2.0.4-1","updateAvailable":false,"packagePending":false,"installing":false,"checkedAt":"2026-08-02T00:00:00.000Z"}\n' \
-	"$installed_version" "$installed_version" \
+printf '{"status":"up_to_date","currentVersion":"%s","installedPackageVersion":"%s","latestUpstreamVersion":"%s","availablePackageVersion":"%s","packagedUpstreamVersion":"%s","updateAvailable":false,"packagePending":false,"installing":false,"checkedAt":"2026-08-02T00:00:00.000Z"}\n' \
+	"$current_version" "$installed_version" "$current_version" \
+	"$installed_version" "$current_version" \
 	>/var/cache/nocturne-connector-plus/update-status.json
 curl -fsS --max-time 3 http://127.0.0.1/api/connector-update/status \
 	>/tmp/connector-update-cached-status.json
-grep -Fq '"latestUpstreamVersion":"v2.0.4-1"' \
+grep -Fq "\"latestUpstreamVersion\":\"$current_version\"" \
 	/tmp/connector-update-cached-status.json
 cross_origin_check_status=$(curl -sS --max-time 3 \
 	-o /tmp/connector-check-cross-origin.json -w '%{http_code}' -X POST \

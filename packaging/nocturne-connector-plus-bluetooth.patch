@@ -5,70 +5,53 @@
 -import { read as fsRead, writeSync, closeSync } from "fs";
 +import { writeSync } from "fs";
  import { createLogger } from "../utils/logger";
- 
+
  const log = createLogger("RFCOMMClient");
-@@ -24,14 +24,19 @@
- 
- export type ClientDataHandler = (data: Buffer) => void;
- export type ClientDisconnectHandler = () => void;
-+type ConnectionState = "disconnected" | "connecting" | "connected" | "closing";
- 
- export class RFCOMMClient {
-   private fd: number = -1;
-   private onData: ClientDataHandler | null = null;
+@@ -34,7 +34,11 @@
    private onDisconnect: ClientDisconnectHandler | null = null;
--  private _connected = false;
-+  private state: ConnectionState = "disconnected";
+   private _connected = false;
    private _address = "";
 +  private _channel = 2;
    private _generation = 0;
 +  private connectPromise: Promise<void> | null = null;
 +  private pendingAddress = "";
 +  private pendingChannel = 2;
- 
+
    setDataHandler(handler: ClientDataHandler): void {
      this.onData = handler;
-@@ -42,7 +47,7 @@
+@@ -53,14 +57,67 @@
    }
- 
-   get connected(): boolean {
--    return this._connected;
-+    return this.state === "connected";
-   }
- 
-   get address(): string {
-@@ -50,19 +55,68 @@
-   }
- 
+
    async connect(address: string, channel?: number): Promise<void> {
--    if (this._connected) {
--      log.warn("Already connected, disconnecting first");
--      this.disconnect();
 +    const targetChannel = channel ?? 2;
-+
 +    if (
-+      this.state === "connected" &&
++      this._connected &&
 +      this._address === address &&
 +      this._channel === targetChannel
 +    ) {
 +      log.info(`RFCOMM already connected to ${address} channel ${targetChannel}`);
 +      return;
-     }
- 
++    }
++
 +    if (this.connectPromise) {
-+      if (this.pendingAddress === address && this.pendingChannel === targetChannel) {
-+        log.info(`RFCOMM connection to ${address} channel ${targetChannel} already in progress`);
++      if (
++        this.pendingAddress === address &&
++        this.pendingChannel === targetChannel
++      ) {
++        log.info(
++          `RFCOMM connection to ${address} channel ${targetChannel} already in progress`
++        );
 +        return this.connectPromise;
 +      }
 +
 +      try {
 +        await this.connectPromise;
 +      } catch {
-+        // The next attempt below reports its own result.
++        // The requested target below gets its own connection attempt.
 +      }
 +
 +      if (
-+        this.state === "connected" &&
++        this._connected &&
 +        this._address === address &&
 +        this._channel === targetChannel
 +      ) {
@@ -78,9 +61,10 @@
 +
 +    this.pendingAddress = address;
 +    this.pendingChannel = targetChannel;
-+    const attempt = Promise.resolve().then(() => this.open(address, targetChannel));
++    const attempt = Promise.resolve().then(() =>
++      this.open(address, targetChannel)
++    );
 +    this.connectPromise = attempt;
-+
 +    try {
 +      await attempt;
 +    } finally {
@@ -92,42 +76,27 @@
 +  }
 +
 +  private open(address: string, targetChannel: number): void {
-+    if (this.state === "connected") {
-+      this.closeCurrent("switching RFCOMM target", true);
-+    }
-+
+     if (this._connected) {
+       log.warn("Already connected, disconnecting first");
+       this.disconnect();
+     }
+
      this._generation++;
 -    const targetChannel = channel ?? 2;
-+    this.state = "connecting";
      this._address = address;
 +    this._channel = targetChannel;
- 
+
      log.info(`Connecting RFCOMM to ${address} channel ${targetChannel}`);
- 
-     const fd = libc.symbols.socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
-     if (fd < 0) {
-+      this.state = "disconnected";
-       throw new Error(`Failed to create Bluetooth socket (returned ${fd})`);
-     }
- 
-@@ -72,64 +126,69 @@
-     const ret = libc.symbols.connect(fd, ptr(sockaddr), 10);
-     if (ret < 0) {
-       libc.symbols.close(fd);
-+      this.state = "disconnected";
-       throw new Error(`RFCOMM connect to ${address} channel ${targetChannel} failed (returned ${ret})`);
-     }
- 
-     this.fd = fd;
--    this._connected = true;
-+    this.state = "connected";
+
+@@ -88,44 +145,39 @@
+     this._connected = true;
      log.info(`RFCOMM connected to ${address} channel ${targetChannel}, fd=${fd}`);
- 
--    this.startReadLoop(fd);
+
+-    this.startReadLoop(fd, address);
 +    void this.startReadLoop(fd, this._generation, address);
    }
- 
--  private startReadLoop(fd: number): void {
+
+-  private startReadLoop(fd: number, address: string): void {
 -    const gen = this._generation;
 -    const buf = Buffer.alloc(4096);
 -
@@ -138,19 +107,26 @@
 -        if (gen !== this._generation) return;
 -
 -        if (err) {
--          log.warn(`RFCOMM read error for ${this._address}: ${err.message}`);
--          this._connected = false;
--          this.fd = -1;
--          this.onDisconnect?.();
+-          log.warn(`RFCOMM read error for ${address}: ${err.message}`);
+-          this.finishReadLoop(fd, address);
 -          return;
-+  private async startReadLoop(fd: number, generation: number, address: string): Promise<void> {
+-        }
+-
+-        if (!bytesRead) {
++  private async startReadLoop(
++    fd: number,
++    generation: number,
++    address: string
++  ): Promise<void> {
 +    try {
 +      const reader = Bun.file(fd).stream().getReader();
 +      while (generation === this._generation && this.fd === fd) {
 +        const { value, done } = await reader.read();
 +        if (generation !== this._generation || this.fd !== fd) return;
 +        if (done) {
-+          log.info(`RFCOMM read loop ended for ${address}`);
+           log.info(`RFCOMM read loop ended for ${address}`);
+-          this.finishReadLoop(fd, address);
+-          return;
 +          break;
          }
 +        if (value) this.onData?.(Buffer.from(value));
@@ -160,15 +136,7 @@
 +      const message = error instanceof Error ? error.message : String(error);
 +      log.warn(`RFCOMM read error for ${address}: ${message}`);
 +    }
- 
--        if (!bytesRead) {
--          log.info(`RFCOMM read loop ended for ${this._address}`);
--          this._connected = false;
--          this.fd = -1;
--          this.onDisconnect?.();
--          return;
--        }
--
+
 -        this.onData?.(Buffer.from(buf.subarray(0, bytesRead)));
 -        doRead();
 -      });
@@ -176,221 +144,56 @@
 -
 -    doRead();
 +    if (generation === this._generation && this.fd === fd) {
-+      this.closeCurrent("RFCOMM read loop stopped", true);
++      this.finishReadLoop(fd, address);
 +    }
    }
- 
-   write(data: Buffer | Uint8Array): void {
--    if (this.fd < 0 || !this._connected) {
-+    if (this.fd < 0 || this.state !== "connected") {
+
+   private finishReadLoop(fd: number, address: string): void {
+     if (this.fd === fd) {
+-      try {
+-        closeSync(fd);
+-      } catch {}
++      this.libc.symbols.close(fd);
+       this.fd = -1;
+     }
+     this._connected = false;
+@@ -137,26 +189,25 @@
+     if (this.fd < 0 || !this._connected) {
        throw new Error("Not connected");
      }
--    writeSync(this.fd, data);
+-    const buffer = Buffer.from(data);
+-    let offset = 0;
+-    while (offset < buffer.length) {
+-      const written = writeSync(
+-        this.fd,
+-        buffer,
+-        offset,
+-        buffer.length - offset,
+-      );
+-      if (written <= 0) throw new Error("RFCOMM write made no progress");
+-      offset += written;
++    const fd = this.fd;
 +    try {
-+      writeSync(this.fd, data);
++      const buffer = Buffer.from(data);
++      let offset = 0;
++      while (offset < buffer.length) {
++        const written = writeSync(fd, buffer, offset, buffer.length - offset);
++        if (written <= 0) throw new Error("RFCOMM write made no progress");
++        offset += written;
++      }
 +    } catch (error) {
-+      this.closeCurrent("RFCOMM write failed", true);
++      if (this.fd === fd) this.finishReadLoop(fd, this._address);
 +      throw error;
-+    }
+     }
    }
- 
+
    disconnect(): void {
--    if (this.fd >= 0) {
+     this._generation++;
+     if (this.fd >= 0) {
 -      try {
 -        closeSync(this.fd);
 -      } catch {}
--      this.fd = -1;
-+    this.closeCurrent("RFCOMM disconnect requested", true);
-+  }
-+
-+  private closeCurrent(reason: string, notify: boolean): void {
-+    const wasActive = this.state !== "disconnected" || this.fd >= 0;
-+    if (!wasActive) return;
-+
-+    this.state = "closing";
-+    this._generation++;
-+    const fd = this.fd;
-+    this.fd = -1;
-+    if (fd >= 0) {
-+      libc.symbols.close(fd);
++      this.libc.symbols.close(this.fd);
+       this.fd = -1;
      }
--    this._connected = false;
-+    this.state = "disconnected";
-+    log.info(`${reason} for ${this._address}`);
-+    if (notify) this.onDisconnect?.();
-   }
- }
---- a/src/server/services/bluetooth-service.ts
-+++ b/src/server/services/bluetooth-service.ts
-@@ -23,6 +23,12 @@
-   private eventListeners: ((event: BluetoothEventType, data: any) => void)[] = [];
-   private _initialized = false;
-   private autoConnectTimer: ReturnType<typeof setTimeout> | null = null;
-+  private reconnectAttempt = 0;
-+  private desiredAddress = "";
-+  private desiredChannel = 2;
-+  private outboundConnectPromise: Promise<void> | null = null;
-+  private outboundConnectAddress = "";
-+  private outboundConnectChannel = 2;
- 
-   get rfcommServer(): RFCOMMServer {
-     return this.rfcomm;
-@@ -71,30 +77,14 @@
-       await this.agent.register();
- 
-       this.adapter.setOnPairComplete((address) => {
--        log.info(`Pairing complete for ${address}, will auto-connect RFCOMM in 3s`);
--        setTimeout(async () => {
--          if (this.rfcommClient.connected) return;
--          try {
--            await this.connect(address);
--          } catch (err) {
--            log.error(`Auto-connect RFCOMM failed for ${address}: ${err}`);
--          }
--        }, 3000);
-+        this.reconnectAttempt = 0;
-+        this.scheduleAutoConnect(address, 2, 3000, "pairing completed");
-       });
- 
-       this.adapter.setOnDeviceConnected((address) => {
-         if (this.rfcommClient.connected && this.rfcommClient.address === address) return;
--        if (this.autoConnectTimer) clearTimeout(this.autoConnectTimer);
--        log.info(`Paired device ${address} connected, auto-connecting RFCOMM channel 2 in 2s`);
--        this.autoConnectTimer = setTimeout(async () => {
--          this.autoConnectTimer = null;
--          if (this.rfcommClient.connected) return;
--          try {
--            await this.connect(address, 2);
--          } catch (err) {
--            log.warn(`Auto-connect to ${address} channel 2 failed: ${err}`);
--          }
--        }, 2000);
-+        this.reconnectAttempt = 0;
-+        this.scheduleAutoConnect(address, 2, 2000, "ACL connected");
-       });
- 
-       this.adapter.setOnDeviceFound((device) => {
-@@ -115,8 +105,10 @@
-       });
- 
-       this.rfcommClient.setDisconnectHandler(() => {
--        log.info(`Outbound RFCOMM disconnected from ${this.rfcommClient.address}`);
--        this.emit("deviceDisconnected", { devicePath: `rfcomm-client:${this.rfcommClient.address}` });
-+        const address = this.rfcommClient.address;
-+        log.info(`Outbound RFCOMM disconnected from ${address}`);
-+        this.emit("deviceDisconnected", { devicePath: `rfcomm-client:${address}` });
-+        this.scheduleReconnect(address, this.desiredChannel);
-       });
- 
-       await this.rfcomm.register();
-@@ -164,13 +156,106 @@
-       clearTimeout(this.autoConnectTimer);
-       this.autoConnectTimer = null;
-     }
-+    const targetChannel = channel ?? 2;
-+    this.desiredAddress = address;
-+    this.desiredChannel = targetChannel;
-+
-+    if (this.outboundConnectPromise) {
-+      if (
-+        this.outboundConnectAddress === address &&
-+        this.outboundConnectChannel === targetChannel
-+      ) {
-+        return this.outboundConnectPromise;
-+      }
-+      try {
-+        await this.outboundConnectPromise;
-+      } catch {
-+        // The requested target below gets its own connection attempt.
-+      }
-+    }
-+
-+    this.outboundConnectAddress = address;
-+    this.outboundConnectChannel = targetChannel;
-+    const attempt = this.connectOutbound(address, targetChannel);
-+    this.outboundConnectPromise = attempt;
-+    try {
-+      await attempt;
-+    } finally {
-+      if (this.outboundConnectPromise === attempt) {
-+        this.outboundConnectPromise = null;
-+        this.outboundConnectAddress = "";
-+      }
-+    }
-+  }
-+
-+  private async connectOutbound(address: string, channel: number): Promise<void> {
-+    const wasConnected =
-+      this.rfcommClient.connected && this.rfcommClient.address === address;
-     await this.rfcommClient.connect(address, channel);
--    this.emit("deviceConnected", {
--      address,
--      devicePath: `rfcomm-client:${address}`,
--    });
-+    this.reconnectAttempt = 0;
-+    if (!wasConnected) {
-+      this.emit("deviceConnected", {
-+        address,
-+        devicePath: `rfcomm-client:${address}`,
-+      });
-+    }
-   }
- 
-+  private scheduleAutoConnect(
-+    address: string,
-+    channel: number,
-+    delayMs: number,
-+    reason: string,
-+  ): void {
-+    if (!address) return;
-+    if (this.rfcommClient.connected && this.rfcommClient.address === address) return;
-+
-+    if (this.autoConnectTimer) clearTimeout(this.autoConnectTimer);
-+    this.desiredAddress = address;
-+    this.desiredChannel = channel;
-+    log.info(
-+      `Scheduling RFCOMM connection to ${address} channel ${channel} in ${delayMs}ms (${reason})`,
-+    );
-+
-+    this.autoConnectTimer = setTimeout(() => {
-+      this.autoConnectTimer = null;
-+      void this.runScheduledConnect(address, channel);
-+    }, delayMs);
-+  }
-+
-+  private async runScheduledConnect(address: string, channel: number): Promise<void> {
-+    if (this.desiredAddress !== address || this.desiredChannel !== channel) return;
-+    if (this.rfcommClient.connected && this.rfcommClient.address === address) return;
-+
-+    const devices = await this.adapter.getDevices();
-+    const aclConnected = devices.some(
-+      (device) =>
-+        device.address.toUpperCase() === address.toUpperCase() && device.connected,
-+    );
-+    if (!aclConnected) {
-+      log.info(`Not reconnecting RFCOMM to ${address}; the Bluetooth ACL is disconnected`);
-+      return;
-+    }
-+
-+    try {
-+      await this.connect(address, channel);
-+    } catch (error) {
-+      log.warn(`RFCOMM connection to ${address} channel ${channel} failed: ${error}`);
-+      this.scheduleReconnect(address, channel);
-+    }
-+  }
-+
-+  private scheduleReconnect(address: string, channel: number): void {
-+    if (!address) return;
-+    if (this.desiredAddress && this.desiredAddress !== address) return;
-+
-+    const exponent = Math.min(this.reconnectAttempt, 5);
-+    const delayMs = Math.min(60_000, 2000 * 2 ** exponent) +
-+      Math.floor(Math.random() * 500);
-+    this.reconnectAttempt++;
-+    this.scheduleAutoConnect(address, channel, delayMs, "RFCOMM reconnect");
-+  }
-+
-   async trust(address: string): Promise<void> {
-     await this.adapter.trustDevice(address);
-   }
+     this._connected = false;

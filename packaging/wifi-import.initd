@@ -1,0 +1,57 @@
+#!/sbin/openrc-run
+# shellcheck shell=ash
+# shellcheck disable=SC2034
+
+description="Import WiFi config from boot partition"
+
+depend() {
+	before wpa_supplicant networking
+	need localmount
+}
+
+find_wifi_config() {
+	for boot_dir in /uboot /boot; do
+		for name in wpa_supplicant wpa-supplicant; do
+			for ext in "" .conf .txt; do
+				if [ -f "$boot_dir/${name}${ext}" ]; then
+					echo "$boot_dir/${name}${ext}"
+					return 0
+				fi
+			done
+		done
+	done
+	return 1
+}
+
+import_config() {
+	import_src=$1
+	import_dst=/etc/wpa_supplicant/wpa_supplicant.conf
+
+	mkdir -p /etc/wpa_supplicant
+	rm -f "$import_dst"
+	cp "$import_src" "$import_dst"
+	grep -q "ctrl_interface" "$import_dst" || \
+		sed -i '1i ctrl_interface=/run/wpa_supplicant' "$import_dst"
+	grep -q "update_config" "$import_dst" || \
+		sed -i '2i update_config=1' "$import_dst"
+}
+
+start() {
+	ebegin "Checking boot partition for WiFi config"
+
+	src=$(find_wifi_config)
+	if [ -n "$src" ]; then
+		boot_dir=${src%/*}
+		einfo "Found $(basename "$src") on boot partition, importing..."
+
+		import_config "$src"
+
+		mount -o remount,rw "$boot_dir" 2>/dev/null
+		rm -f "$src"
+		mount -o remount,ro "$boot_dir" 2>/dev/null
+
+		einfo "WiFi config imported and removed from boot partition"
+	fi
+
+	eend 0
+}

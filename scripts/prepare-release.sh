@@ -80,8 +80,7 @@ for required in \
 	src/bunfig.toml \
 	src/package.json \
 	src/server/index.ts \
-	src/tsconfig.json \
-	scripts/services/wifi-import.sh; do
+	src/tsconfig.json; do
 	[ -f "$checkout/$required" ] || {
 		echo "Upstream layout changed; missing $required" >&2
 		exit 1
@@ -137,6 +136,7 @@ actual_bun_sha256=$(sha256sum "$output_dir/$bun_name" | awk '{print $1}')
 
 cp "$repo_dir"/packaging/connector-api.confd \
 	"$repo_dir"/packaging/connector-api.initd \
+	"$repo_dir"/packaging/wifi-import.initd \
 	"$repo_dir"/packaging/nocturne-connector-plus.* \
 	"$repo_dir"/packaging/*.patch \
 	"$output_dir/"

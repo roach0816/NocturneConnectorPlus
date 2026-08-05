@@ -24,6 +24,7 @@ source="
 	$_bun_archive-$_bun_version.zip
 	connector-api.initd
 	connector-api.confd
+	wifi-import.initd
 	nocturne-connector-plus.install-update
 	nocturne-connector-plus.protected-paths
 	nocturne-connector-plus.post-transaction
@@ -64,7 +65,7 @@ check() {
 	test -f "$builddir/src/server/index.ts"
 	test -f "$builddir/src/dist/client/index.html"
 	test -d "$srcdir/runtime/node_modules"
-	test -f "$builddir/scripts/services/wifi-import.sh"
+	test -f "$srcdir/wifi-import.initd"
 	test -f "$builddir/src/server/routes/connector-update.ts"
 	grep -Fq 'Install Update' "$builddir/src/client/pages/Settings.tsx"
 	grep -Fq 'Nocturne Connector Plus' \
@@ -115,7 +116,7 @@ package() {
 		"$pkgdir/etc/init.d/connector-api"
 	install -m 0644 "$srcdir/connector-api.confd" \
 		"$pkgdir/etc/conf.d/connector-api"
-	install -m 0755 "$builddir/scripts/services/wifi-import.sh" \
+	install -m 0755 "$srcdir/wifi-import.initd" \
 		"$pkgdir/etc/init.d/wifi-import"
 }
 

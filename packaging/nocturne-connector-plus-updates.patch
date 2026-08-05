@@ -1,32 +1,44 @@
 --- a/src/server/index.ts
 +++ b/src/server/index.ts
-@@ -13,6 +13,7 @@
- import { createBluetoothRoutes } from "./routes/bluetooth";
+@@ -14,6 +14,7 @@
  import { createDeviceRoutes } from "./routes/device";
  import { createAnalyticsRoutes } from "./routes/analytics";
+ import { createOtaRoutes } from "./routes/ota";
 +import { connectorUpdateRoutes } from "./routes/connector-update";
  import { existsSync } from "fs";
- 
+
  const log = createLogger("Server");
-@@ -88,6 +89,7 @@
+@@ -89,6 +90,7 @@
      .use(createBluetoothRoutes(manager.bluetoothService))
      .use(createDeviceRoutes(manager))
      .use(createAnalyticsRoutes(manager.analyticsService))
 +    .use(connectorUpdateRoutes)
+     .use(createOtaRoutes(manager.otaService))
      .ws("/ws", {
        open(ws) {
-         ws.subscribe(WS_TOPIC);
 --- /dev/null
 +++ b/src/server/routes/connector-update.ts
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,324 @@
 +import { Elysia } from "elysia";
-+import { existsSync, readFileSync } from "fs";
++import {
++  existsSync,
++  mkdirSync,
++  readFileSync,
++  renameSync,
++  writeFileSync,
++} from "fs";
 +import { createLogger } from "../utils/logger";
 +
 +const PACKAGE_NAME = "nocturne-connector-plus";
 +const UPDATE_HELPER =
 +  "/usr/libexec/nocturne-connector-plus/install-connector-update";
 +const UPDATE_LOCK = "/run/nocturne-connector-plus-update.lock";
++const PACKAGE_VERSION_PATH =
++  "/usr/libexec/nocturne-connector-plus/package-version";
++const STATUS_CACHE_PATH =
++  "/var/cache/nocturne-connector-plus/update-status.json";
++const STATUS_CACHE_TMP_PATH = `${STATUS_CACHE_PATH}.tmp`;
++const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 +const UPSTREAM_RELEASE_URL =
 +  "https://api.github.com/repos/usenocturne/nocturne-connector/releases/latest";
 +const PACKAGE_VERSIONS_URL =
@@ -48,6 +60,19 @@
 +  tag_name?: string;
 +  draft?: boolean;
 +  prerelease?: boolean;
++}
++
++interface UpdateStatus {
++  status: "up_to_date" | "update_available" | "package_pending";
++  currentVersion: string;
++  installedPackageVersion: string;
++  latestUpstreamVersion: string;
++  availablePackageVersion: string;
++  packagedUpstreamVersion: string | null;
++  updateAvailable: boolean;
++  packagePending: boolean;
++  installing: false;
++  checkedAt: string;
 +}
 +
 +async function runCommand(command: string[]): Promise<string> {
@@ -91,6 +116,28 @@
 +  }
 +}
 +
++function currentPackageVersion(): string {
++  try {
++    return readFileSync(PACKAGE_VERSION_PATH, "utf-8").trim();
++  } catch {
++    return "unknown";
++  }
++}
++
++function readCachedStatus(): UpdateStatus | null {
++  try {
++    return JSON.parse(readFileSync(STATUS_CACHE_PATH, "utf-8")) as UpdateStatus;
++  } catch {
++    return null;
++  }
++}
++
++function writeCachedStatus(status: UpdateStatus): void {
++  mkdirSync("/var/cache/nocturne-connector-plus", { recursive: true });
++  writeFileSync(STATUS_CACHE_TMP_PATH, `${JSON.stringify(status)}\n`, "utf-8");
++  renameSync(STATUS_CACHE_TMP_PATH, STATUS_CACHE_PATH);
++}
++
 +function isSameOriginRequest(request: Request): boolean {
 +  const origin = request.headers.get("origin");
 +  if (!origin) return true;
@@ -102,16 +149,9 @@
 +  }
 +}
 +
-+async function getUpdateStatus() {
++async function checkForUpdates(): Promise<UpdateStatus> {
 +  if (existsSync(UPDATE_LOCK)) {
-+    return {
-+      status: "installing" as const,
-+      currentVersion: currentUpstreamVersion(),
-+      updateAvailable: false,
-+      packagePending: false,
-+      installing: true,
-+      checkedAt: new Date().toISOString(),
-+    };
++    throw new Error("A Connector update is currently being installed");
 +  }
 +
 +  await runCommand(["apk", "update"]);
@@ -177,7 +217,7 @@
 +  const packagePending =
 +    upstreamAhead && packagedUpstreamVersion !== latestUpstreamVersion;
 +
-+  return {
++  const status: UpdateStatus = {
 +    status: updateAvailable
 +      ? ("update_available" as const)
 +      : packagePending
@@ -193,23 +233,74 @@
 +    installing: false,
 +    checkedAt: new Date().toISOString(),
 +  };
++  writeCachedStatus(status);
++  return status;
 +}
 +
-+let statusCheck: ReturnType<typeof getUpdateStatus> | null = null;
++let statusCheck: ReturnType<typeof checkForUpdates> | null = null;
 +
-+function getCoalescedUpdateStatus() {
++function getCoalescedUpdateStatus(): Promise<UpdateStatus> {
 +  if (!statusCheck) {
-+    statusCheck = getUpdateStatus().finally(() => {
++    statusCheck = checkForUpdates().finally(() => {
 +      statusCheck = null;
 +    });
 +  }
 +  return statusCheck;
 +}
 +
++function getCachedUpdateStatus() {
++  const currentVersion = currentUpstreamVersion();
++  const installedPackageVersion = currentPackageVersion();
++  if (existsSync(UPDATE_LOCK)) {
++    return {
++      status: "installing" as const,
++      currentVersion,
++      installedPackageVersion,
++      updateAvailable: false,
++      packagePending: false,
++      installing: true,
++      checkedAt: new Date().toISOString(),
++    };
++  }
++
++  const cached = readCachedStatus();
++  if (cached && cached.installedPackageVersion === installedPackageVersion) {
++    return { ...cached, currentVersion, installedPackageVersion };
++  }
++
++  return {
++    status: "checking" as const,
++    currentVersion,
++    installedPackageVersion,
++    updateAvailable: false,
++    packagePending: false,
++    installing: false,
++    checkedAt: new Date(0).toISOString(),
++  };
++}
++
++function runBackgroundCheck(): void {
++  void getCoalescedUpdateStatus().catch((error) => {
++    log.warn(`Automatic update check failed: ${error}`);
++  });
++}
++
++runBackgroundCheck();
++const updateCheckTimer = setInterval(runBackgroundCheck, UPDATE_CHECK_INTERVAL_MS);
++updateCheckTimer.unref();
++
 +export const connectorUpdateRoutes = new Elysia({
 +  prefix: "/api/connector-update",
 +})
-+  .get("/status", async ({ set }) => {
++  .get("/status", ({ set }) => {
++    set.headers["cache-control"] = "no-store";
++    return getCachedUpdateStatus();
++  })
++  .post("/check", async ({ request, set }) => {
++    if (!isSameOriginRequest(request)) {
++      set.status = 403;
++      return { error: "Update checks must be started from the local web interface" };
++    }
 +    set.headers["cache-control"] = "no-store";
 +    return getCoalescedUpdateStatus();
 +  })
@@ -223,11 +314,15 @@
 +      return { error: "A Connector update is already running" };
 +    }
 +
-+    const status = await getCoalescedUpdateStatus();
-+    if (!status.updateAvailable) {
++    const status = getCachedUpdateStatus();
++    if (
++      !status.updateAvailable ||
++      !("availablePackageVersion" in status)
++    ) {
 +      set.status = 409;
 +      return { error: "No signed Connector package update is available" };
 +    }
++    const targetPackageVersion = status.availablePackageVersion;
 +    if (!existsSync(UPDATE_HELPER)) {
 +      set.status = 500;
 +      return { error: "The package update helper is not installed" };
@@ -236,11 +331,11 @@
 +    try {
 +      await runCommand([UPDATE_HELPER, "start"]);
 +      log.info(
-+        `Started package update from ${status.installedPackageVersion} to ${status.availablePackageVersion}`,
++        `Started package update from ${status.installedPackageVersion} to ${targetPackageVersion}`,
 +      );
 +      return {
 +        status: "installing",
-+        targetPackageVersion: status.availablePackageVersion,
++        targetPackageVersion,
 +      };
 +    } catch (error) {
 +      log.error(`Could not start package update: ${error}`);
@@ -248,117 +343,3 @@
 +      return { error: "Could not start the Connector update" };
 +    }
 +  });
---- a/src/client/pages/Settings.tsx
-+++ b/src/client/pages/Settings.tsx
-@@ -4,9 +4,17 @@
- import { Card, CardContent } from "@/components/ui/card";
- import { Button } from "@/components/ui/button";
- import { Alert, AlertDescription } from "@/components/ui/alert";
-+import { Badge } from "@/components/ui/badge";
- import { Switch } from "@/components/ui/switch";
--import { LogOut, Trash2, RotateCw, ExternalLink } from "lucide-react";
- import {
-+  Download,
-+  ExternalLink,
-+  LogOut,
-+  RefreshCw,
-+  RotateCw,
-+  Trash2,
-+} from "lucide-react";
-+import {
-   AlertDialog,
-   AlertDialogAction,
-   AlertDialogCancel,
-@@ -18,6 +26,19 @@
-   AlertDialogTrigger,
- } from "@/components/ui/alert-dialog";
- 
-+interface ConnectorUpdateStatus {
-+  status: "up_to_date" | "update_available" | "package_pending" | "installing";
-+  currentVersion: string;
-+  installedPackageVersion?: string;
-+  latestUpstreamVersion?: string;
-+  availablePackageVersion?: string;
-+  packagedUpstreamVersion?: string | null;
-+  updateAvailable: boolean;
-+  packagePending: boolean;
-+  installing: boolean;
-+  checkedAt: string;
-+}
-+
- export function Settings() {
-   const { user, signOut, refresh } = useAuth();
-   const [info, setInfo] = useState<any>(null);
-@@ -26,9 +47,29 @@
-   const [deleteError, setDeleteError] = useState<string | null>(null);
-   const [analyticsEnabled, setAnalyticsEnabled] = useState<boolean | null>(null);
-   const [analyticsBusy, setAnalyticsBusy] = useState(false);
-+  const [updateStatus, setUpdateStatus] = useState<ConnectorUpdateStatus | null>(null);
-+  const [checkingUpdate, setCheckingUpdate] = useState(false);
-+  const [installingUpdate, setInstallingUpdate] = useState(false);
-+  const [updateError, setUpdateError] = useState<string | null>(null);
- 
-+  const checkConnectorUpdate = async () => {
-+    if (checkingUpdate || installingUpdate) return;
-+    setCheckingUpdate(true);
-+    setUpdateError(null);
-+    try {
-+      const status = await get<ConnectorUpdateStatus>("/api/connector-update/status");
-+      setUpdateStatus(status);
-+      setInstallingUpdate(status.installing);
-+    } catch (err: any) {
-+      setUpdateError(err?.message ?? "Unable to check for Connector updates.");
-+    } finally {
-+      setCheckingUpdate(false);
-+    }
-+  };
-+
-   useEffect(() => {
-     get("/api/info").then(setInfo).catch(() => { });
-+    void checkConnectorUpdate();
-   }, []);
- 
-   useEffect(() => {
-@@ -70,6 +111,42 @@
-     }
-   };
- 
-+  const handleInstallUpdate = async () => {
-+    if (!updateStatus?.updateAvailable || installingUpdate) return;
-+    setInstallingUpdate(true);
-+    setUpdateError(null);
-+    try {
-+      await post("/api/connector-update/install");
-+
-+      // The package transaction intentionally restarts this API. Poll until
-+      // the new process is healthy and reports that the signed update landed.
-+      await new Promise((resolve) => setTimeout(resolve, 3000));
-+      for (let attempt = 0; attempt < 90; attempt++) {
-+        let status: ConnectorUpdateStatus | null = null;
-+        try {
-+          status = await get<ConnectorUpdateStatus>(
-+            "/api/connector-update/status",
-+          );
-+          setUpdateStatus(status);
-+        } catch {
-+          // A short connection failure is expected while OpenRC restarts the API.
-+        }
-+        if (status && !status.installing) {
-+          if (status.updateAvailable) {
-+            throw new Error("The package update did not complete successfully.");
-+          }
-+          window.location.reload();
-+          return;
-+        }
-+        await new Promise((resolve) => setTimeout(resolve, 2000));
-+      }
-+      throw new Error("Timed out waiting for the updated Connector to restart.");
-+    } catch (err: any) {
-+      setUpdateError(err?.message ?? "Unable to install the Connector update.");
-+      setInstallingUpdate(false);
-+    }
-+  };
-+
-   return (
-     <div>
-       <div className="mb-10">
