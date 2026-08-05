@@ -71,8 +71,36 @@
      get<{ enabled: boolean }>("/api/analytics/status")
        .then((r) => setAnalyticsEnabled(r.enabled))
        .catch(() => { });
-@@ -209,6 +233,76 @@
-                     <span className="text-sm font-medium text-fg">{value}</span>
+@@ -201,18 +225,110 @@
+             <CardContent>
+               <div className="space-y-3">
+                 {[
+-                  ["Connector Version", info?.version ?? "Unknown"],
+-                  ["OS Version", info?.osVersion ?? "Unknown"],
+-                ].map(([label, value]) => (
++                  {
++                    label: "Connector Version",
++                    value: info?.version ?? "Unknown",
++                    href: "https://github.com/usenocturne/nocturne-connector",
++                  },
++                  {
++                    label: "OS Version",
++                    value: info?.osVersion ?? "Unknown",
++                    href: "https://github.com/alpinelinux/aports",
++                  },
++                ].map(({ label, value, href }) => (
+                   <div key={label} className="flex items-center justify-between rounded-lg bg-bg px-3 py-2.5">
+                     <span className="text-sm text-secondary">{label}</span>
+-                    <span className="text-sm font-medium text-fg">{value}</span>
++                    <a
++                      href={href}
++                      target="_blank"
++                      rel="noreferrer"
++                      className="inline-flex items-center gap-1 text-sm font-medium text-fg transition hover:text-accent"
++                    >
++                      {value}
++                      <ExternalLink className="size-3" />
++                    </a>
                    </div>
                  ))}
 +                <div className="rounded-lg bg-bg px-3 py-2.5">
@@ -124,9 +152,15 @@
 +                        )}
 +                      </div>
 +                    </div>
-+                    <span className="min-w-24 text-right text-sm font-medium text-fg">
++                    <a
++                      href="https://github.com/roach0816/NocturneConnectorPlus"
++                      target="_blank"
++                      rel="noreferrer"
++                      className="inline-flex min-w-24 items-center justify-end gap-1 text-right text-sm font-medium text-fg transition hover:text-accent"
++                    >
 +                      {info?.plusVersion ?? "Unknown"}
-+                    </span>
++                      <ExternalLink className="size-3" />
++                    </a>
 +                  </div>
 +                  {updateStatus?.latestUpstreamVersion && (
 +                    <p className="mt-2 text-xs text-muted sm:text-right">
@@ -148,6 +182,10 @@
                </div>
              </CardContent>
            </Card>
+         </section>
+
+         <section>
+           <h3 className="mb-4 text-xs font-medium uppercase tracking-widest text-muted">
 --- a/src/server/routes/connector-update.ts
 +++ b/src/server/routes/connector-update.ts
 @@ -1,11 +1,23 @@
